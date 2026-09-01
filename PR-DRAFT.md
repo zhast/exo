@@ -233,3 +233,45 @@ machines correctly with Tensor + MlxJaccl.
 All of the above was re-verified with `auto_parallel.py` restored to pristine
 (`git checkout`), so none of it is an artifact of the tracing used to diagnose
 it.
+
+## Update: GLM-5.3-Flash does run, on v1.0.71 built from source
+
+Everything above was found while trying to make `main` work. It turned out not
+to be the right path. **v1.0.71 built from source** federates over libp2p with a
+working `--bootstrap-peers`, forms a full RDMA mesh in ~20s, and reaches
+`Pipeline/MlxJaccl ready=3/3` with GLM-5.3-Flash (102.6 GiB, `glm5_next`) split
+15/15/15 across three Mac Studios. The same placement on `main` never got past
+`mx.eval` in `PipelineLastLayer`.
+
+Worth stating plainly: the shipped `.app` cannot accept a new architecture,
+because its Python lives in a PyInstaller archive. That is not true of a source
+checkout, and mistaking the two is what made this look impossible for a while.
+
+The out-of-tree changes this needs are in `patches/`, as diffs against the
+pristine upstream wheels. Two of them are arguably exo's problem rather than
+mlx's:
+
+- exo detects recurrent (SSM) layers with `isinstance` against **mlx-lm's**
+  `ArraysCache`. A model whose `make_cache` returns mlx-vlm's API-identical
+  duplicate fails `has_non_kv_caches()`, the post-prefill rollback and the trim
+  path, and exo then calls `.trim()` on recurrent state. Matching on a
+  structural property (e.g. `is_trimmable`, or absence of `.keys`) would be
+  robust to which package a model's caches come from.
+- `pipeline_auto_parallel` replaces `inner.layers` with a slice after the model
+  is constructed. Any model that caches layer indices in `__init__` is silently
+  wrong afterwards - masks get built from the wrong cache entry and generation
+  degrades without raising. exo already special-cases `GptOssMoeModel` for
+  `layer_types` here; a general "re-derive per-shard state after slicing" hook
+  would cover the rest.
+
+Also confirmed: placement sizes shards from system RAM with no notion of the GPU
+working-set ceiling (`iogpu.wired_limit_mb`, default ~75% of RAM) or of memory
+already wired. Exceeding it aborts the runner *mid-collective* with
+`kIOGPUCommandBufferCallbackErrorOutOfMemory`, and the peers then block in
+`recv` forever - externally indistinguishable from a deadlock.
+
+Open: output quality on the `oQ2` 2-bit checkpoint is wrong (valid tokens, no
+semantics). A control on the identical 3-node MlxJaccl pipeline is coherent
+(`GLM-4.7-Flash-4bit` returns `391` and `Paris`), so the pipeline and RDMA path
+are not implicated. mlx-vlm's own loader rejects this checkpoint outright (483
+unplaceable parameters), so there is no native reference to compare against.
