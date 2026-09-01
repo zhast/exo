@@ -158,7 +158,7 @@ looked like a hang.
 Suggested fix: clamp per-node shard size by the GPU limit (and by already
 wired memory), not just by `ramAvailable`.
 
-### glm5_next deadlocks in pipeline mode
+### Pipeline + MlxJaccl deadlocks on main for ANY real model
 
 With a GPU-safe placement the model loads completely - all 45 layers, no OOM,
 full 6/6 RDMA mesh - and then rank 0 hangs forever in the `mx.eval(output)`
@@ -196,3 +196,23 @@ multi-rank pipeline execution together. It reproduces with 2, 3 and 4 ranks.
   module path while the checkpoint keys it un-nested, so those layers stay
   `nn.Linear` while their siblings are quantized and the fused
   linear-attention matmul dies on `m.scales`.
+
+#### Not model specific
+
+The same hang reproduces with `mlx-community/GLM-4.7-Flash-4bit` - a
+different architecture (`glm4_moe_lite`), 16 GiB, 14/33-layer shards, and a
+model that serves correctly in the released 1.0.71 app. Identical signature:
+
+    rank 0   cpu frozen 0:04.81   [PIPE r=0] last.layer DONE   stream IDLE
+    rank 1   cpu 8:36 -> 8:41     [PIPE r=1] first.recv ENTER  stream IDLE
+
+So this is not about glm5_next, quantization, MoE, or model size. Pipeline
+sharding over MlxJaccl appears broken on `main` for real models in general.
+Note the released app runs the same cluster fine with **Tensor** sharding, so
+the fault is specific to the Pipeline path.
+
+Reduced repro attempts that all PASS (so the fault is none of these):
+`PipelineFirstLayer`/`PipelineLastLayer` across 2 jaccl ranks with a toy
+model, and the same at realistic scale (22 layers x 4096, 4-D input) - both
+complete in 0.00 s. A real model's shard evaluated standalone completes in
+0.2-1.1 s. Only real-model-plus-pipeline hangs.
