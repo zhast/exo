@@ -216,3 +216,20 @@ Reduced repro attempts that all PASS (so the fault is none of these):
 model, and the same at realistic scale (22 layers x 4096, 4-D input) - both
 complete in 0.00 s. A real model's shard evaluated standalone completes in
 0.2-1.1 s. Only real-model-plus-pipeline hangs.
+
+#### Tensor sharding on main stalls too
+
+For completeness, `Tensor` + `MlxJaccl` x2 on the same cluster and the same
+known-good model does not stall at warmup but at *load*:
+
+    runner A  layersLoaded 46/47   cpu advancing
+    runner B  layersLoaded  0/47   cpu frozen at 0:02.92
+
+One rank never begins loading. So on `main` both distributed backends fail on
+this hardware - Pipeline (either MlxRing or MlxJaccl) deadlocks at warmup, and
+Tensor stalls during load - while the released 1.0.71 app drives the same four
+machines correctly with Tensor + MlxJaccl.
+
+All of the above was re-verified with `auto_parallel.py` restored to pristine
+(`git checkout`), so none of it is an artifact of the tracing used to diagnose
+it.
