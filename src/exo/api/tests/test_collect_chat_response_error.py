@@ -1,7 +1,7 @@
-import json
 from collections.abc import AsyncGenerator
 
 from exo.api.adapters.chat_completions import collect_chat_response
+from exo.api.types import ErrorResponse
 from exo.shared.types.chunks import (
     ErrorChunk,
     PrefillProgressChunk,
@@ -35,6 +35,6 @@ async def test_error_chunk_yields_error_body_instead_of_raising() -> None:
         item async for item in collect_chat_response(CommandId("cmd"), _stream(error))
     ]
     assert len(items) == 1
-    body = json.loads(items[0])
-    assert body["error"]["message"] == "image input is not supported here"
-    assert body["error"]["code"] == 500
+    body = ErrorResponse.model_validate_json(items[0])
+    assert body.error.message == "image input is not supported here"
+    assert body.error.code == 500
