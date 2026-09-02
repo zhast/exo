@@ -30,7 +30,10 @@ from exo.worker.engines.base import Engine
 from exo.worker.engines.mlx.cache import KVPrefixCache
 from exo.worker.engines.mlx.disaggregated.adapter import write_cache_to_wire
 from exo.worker.engines.mlx.disaggregated.serve import run_prefill_for_request
-from exo.worker.engines.mlx.generator.batch_generate import ExoBatchGenerator
+from exo.worker.engines.mlx.generator.batch_generate import (
+    ExoBatchGenerator,
+    UnsupportedRequestError,
+)
 from exo.worker.engines.mlx.generator.generate import (
     PrefillCancelled,
     mlx_generate,
@@ -411,6 +414,12 @@ class BatchGenerator(Engine):
             try:
                 uid = self._start_task(task)
             except PrefillCancelled:
+                continue
+            except UnsupportedRequestError as e:
+                # A request this runner cannot serve (e.g. images without a
+                # vision processor). Tell the client and move on; the runner
+                # itself is healthy.
+                self._send_error(task, e)
                 continue
             except Exception as e:
                 self._send_error(task, e)
