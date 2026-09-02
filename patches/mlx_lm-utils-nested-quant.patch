@@ -8,10 +8,12 @@
  from pathlib import Path
  from textwrap import dedent
  from typing import (
-@@ -279,6 +280,81 @@
+@@ -277,8 +278,83 @@
+             config["eos_token_id"] = eos_token_id
+ 
      return config
- 
- 
++
++
 +def _load_safetensors_with_e8m0(path: str) -> Dict[str, mx.array]:
 +    with open(path, "rb") as f:
 +        header_len = struct.unpack("<Q", f.read(8))[0]
@@ -37,10 +39,10 @@
 +    if not e8m0_tensors:
 +        # Shouldn't reach here if caller filtered correctly, but fall back anyway.
 +        return dict(mx.load(path))
-+
+ 
 +    # Write a scratch safetensors without the F8_E8M0 entries so mx.load works.
 +    import tempfile
-+
+ 
 +    with tempfile.NamedTemporaryFile(
 +        prefix="mlx_lm_e8m0_", suffix=".safetensors", delete=False
 +    ) as tmp:
@@ -104,7 +106,7 @@
  
      if (model_file := config.get("model_file")) is not None:
          spec = importlib.util.spec_from_file_location(
-@@ -347,12 +428,17 @@
+@@ -347,12 +428,22 @@
  
      def _quantize(quantization):
          def class_predicate(p, m):
@@ -116,6 +118,11 @@
 +            candidates = [p]
 +            if ".forget_gate." in p:
 +                candidates.append(p.replace(".forget_gate.", "."))
++            # Checkpoints quantised from the upstream-HF layout key their
++            # per-module overrides as "model.layers.N...." while the bridge's
++            # module path is "language_model.model.layers.N....".
++            if p.startswith("language_model."):
++                candidates.append(p[len("language_model.") :])
 +            for c in candidates:
 +                if c in config["quantization"]:
 +                    return config["quantization"][c]

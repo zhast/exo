@@ -98,6 +98,16 @@ class Model(nn.Module):
         for k, v in weights.items():
             if k.startswith(_VISION_PREFIXES):
                 continue
+            # Two checkpoint lineages exist for glm5_next:
+            #  * MLX-native (Vontra, grant-ai, ...): language_model.model.layers.N,
+            #    experts already stacked into switch_mlp, kv_b_proj already absorbed.
+            #  * upstream-HF layout quantised in place (orcarouter, ...):
+            #    model.language_model.layers.N, per-expert mlp.experts.N.*, and a raw
+            #    kv_b_proj. mlx_vlm's inherited DeepSeek-V32 sanitize stacks the
+            #    experts and absorbs kv_b_proj into embed_q/unembed_out, but only
+            #    when the keys start with "model.layers.". Canonicalise to that.
+            if k.startswith("model.language_model."):
+                k = "model." + k[len("model.language_model.") :]
             lang[k[len("language_model.") :] if k.startswith("language_model.") else k] = v
         lang = self.language_model.sanitize(lang)
         lang = _renest_forget_gate_quant(lang)

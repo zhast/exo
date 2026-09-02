@@ -12,9 +12,9 @@ forms a full RDMA mesh; `Pipeline/MlxJaccl` reaches `ready=3/3` and generates.
 
 | file | what it fixes |
 | --- | --- |
-| `mlx_lm-models-glm5_next.py` | NEW. Bridges `glm5_next` (which exists only in mlx-vlm) into mlx-lm's registry, because EXO loads text models through mlx-lm unconditionally. Also (a) re-nests the forget-gate `f_a_proj`/`f_b_proj` `.scales`/`.biases`, which mlx-vlm's `sanitize` leaves un-nested on a quantized checkpoint, and (b) builds caches from `mlx_lm.models.cache` classes. |
+| `mlx_lm-models-glm5_next.py` | NEW. Bridges `glm5_next` (which exists only in mlx-vlm) into mlx-lm's registry, because EXO loads text models through mlx-lm unconditionally. Also (a) re-nests the forget-gate `f_a_proj`/`f_b_proj` `.scales`/`.biases`, which mlx-vlm's `sanitize` leaves un-nested on a quantized checkpoint, (b) builds caches from `mlx_lm.models.cache` classes, and (c) canonicalises checkpoints quantised in the upstream-HF layout (`model.language_model.layers.N.*`, per-expert `mlp.experts.N.*`, raw `kv_b_proj` — e.g. `orcarouter/GLM-5.3-Flash-Uncensored-MLX`) to the `model.layers.N.*` prefix mlx-vlm's inherited DeepSeek-V32 `sanitize` keys its expert stacking and `kv_b_proj` absorption on. |
 | `mlx_vlm-glm5_next-language.patch` | `ssm_idx`/`fa_idx` as properties resolved against the *current* layer list, plus a `_pool` staleness guard for the DSA indexer. |
-| `mlx_lm-utils-nested-quant.patch` | Makes `load_model`'s `class_predicate` nesting-aware so `forget_gate.f_a_proj` finds its un-nested `config["quantization"]` override. |
+| `mlx_lm-utils-nested-quant.patch` | Makes `load_model`'s `class_predicate` nesting-aware so `forget_gate.f_a_proj` finds its un-nested `config["quantization"]` override, and lets a module at `language_model.model.layers.N.x` find an override written as `model.layers.N.x` (how upstream-HF-layout checkpoints key their per-module bit widths). |
 
 ## Why the cache-class fix is needed
 
