@@ -18,6 +18,7 @@ drops the vision tensors, which this text path does not own.
 import inspect
 from dataclasses import dataclass
 
+import mlx.core as mx
 import mlx.nn as nn
 from mlx_vlm.models.glm5_next.config import TextConfig
 from mlx_vlm.models.glm5_next.language import LanguageModel
@@ -111,6 +112,19 @@ class Model(nn.Module):
             lang[k[len("language_model.") :] if k.startswith("language_model.") else k] = v
         lang = self.language_model.sanitize(lang)
         lang = _renest_forget_gate_quant(lang)
+        # MLX promotes on the scales dtype: quantized_matmul / gather_qmm with
+        # bfloat16 activations and float16 scales return float32 (bfloat16
+        # scales return bfloat16). Checkpoints that store scales/biases as
+        # float16 therefore flip the whole residual stream to float32 at the
+        # first quantized MLP and never come back -- which upcasts every
+        # remaining bf16 weight on each call, doubles the KV cache, and makes
+        # MLA prefill ask for a float32 SDPA kernel at head_dim 256 that needs
+        # more threadgroup memory than Metal allows, so any prompt beyond a
+        # handful of tokens fails to load a kernel at all.
+        lang = {
+            k: (v.astype(mx.bfloat16) if v.dtype == mx.float16 else v)
+            for k, v in lang.items()
+        }
         return {f"language_model.{k}": v for k, v in lang.items()}
 
     def make_cache(self):
