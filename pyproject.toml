@@ -78,7 +78,7 @@ members = ["rust/exo_pyo3_bindings", "bench"]
 exo-pyo3-bindings = { workspace = true }
 mlx = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git", branch = "address-rdma-gpu-locks", marker = "sys_platform == 'darwin'" }
 mlx-lm = { git = "https://github.com/zhast/mlx-lm", rev = "4dbede857c7a7da7be37130e22de4830b33aa110" }
-mlx-vlm = { git = "https://github.com/zhast/mlx-vlm", rev = "0e148c2484d8a433715b015c3a360c783a62f933" }
+mlx-vlm = { git = "https://github.com/zhast/mlx-vlm", rev = "eaeca8b167c6b8bbf96bf81fba3047c5bb4112f4" }
 torch = [
   { index = "pytorch-cu130", marker = "sys_platform == 'linux' and extra == 'cuda13' and extra != 'cpu' and extra != 'cuda12'" },
   { index = "pytorch-cu120", marker = "sys_platform == 'linux' and extra == 'cuda12' and extra != 'cpu' and extra != 'cuda13'" },
@@ -155,7 +155,7 @@ required-version = ">=0.8.6"
 prerelease = "allow"
 environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
 conflicts = [[{ extra = "cuda12" }, { extra = "cuda13" }, { extra = "cpu" }]]
-constraint-dependencies = ["transformers==5.2.0"]
+constraint-dependencies = ["transformers>=5.0.0,<5.4.0"]
 override-dependencies = [
   "mlx==0.31.1; sys_platform=='linux'",
   "mlx; sys_platform=='darwin'",
