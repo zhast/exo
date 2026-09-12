@@ -116,6 +116,7 @@ Set as environment variables, or in an optional
 | --- | --- | --- | --- |
 | `prefill_step_size` | `EXO_PREFILL_STEP_SIZE` | 1024 | 4096 upstream; smaller cuts transient GPU memory on heavy ranks |
 | `max_prompt_tokens` | `EXO_MAX_PROMPT_TOKENS` | 65536 | The 6-bit build is validated to 200000 on 4x96 GB with the cache limit below |
+| `max_prompt_tokens_ring` | `EXO_MAX_PROMPT_TOKENS_RING` | 65536 | Applied on top of the above only when the instance runs on `MlxRing`, whose ranks hold more resident memory: a ~99k-token prompt killed the heaviest 6-bit rank at ~90 GB on the TCP fallback while 200k is fine over RDMA |
 | `mlx_cache_limit_gb` | `EXO_MLX_CACHE_LIMIT_GB` | unset | 2.0 on the validation cluster; cached-but-free Metal buffers stay wired |
 | `ssm_snapshot_stride_tokens` | `EXO_SSM_SNAPSHOT_STRIDE` | 8192 | Coarser costs at most this many tokens of re-prefill on a partial prefix hit |
 | `mem_telemetry` | `EXO_MEM_TELEMETRY` | off | Logs MLX active/peak/cache per request |

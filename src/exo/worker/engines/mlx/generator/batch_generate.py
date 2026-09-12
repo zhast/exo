@@ -223,6 +223,17 @@ class ExoBatchGenerator:
         max_prompt_tokens = _tunable(
             "max_prompt_tokens", "EXO_MAX_PROMPT_TOKENS", 65536
         )
+        # MlxRing ranks hold more resident memory than MlxJaccl ones: on
+        # 2026-09-12 a 98,993-token prompt killed the heaviest 6-bit rank at
+        # ~90 GB active on the TCP fallback (signal 6), while 200k is fine
+        # over RDMA. The fallback therefore gets its own, lower cap.
+        if os.environ.get("EXO_ACTIVE_BACKEND") == "MlxRing":
+            max_prompt_tokens = min(
+                max_prompt_tokens,
+                _tunable(
+                    "max_prompt_tokens_ring", "EXO_MAX_PROMPT_TOKENS_RING", 65536
+                ),
+            )
         if len(all_prompt_tokens) > max_prompt_tokens:
             raise UnsupportedRequestError(
                 f"prompt is {len(all_prompt_tokens)} tokens; this deployment accepts "

@@ -116,6 +116,8 @@ def mlx_distributed_init(
                 os.environ["MLX_HOSTFILE"] = coordination_file
                 os.environ["MLX_RANK"] = str(rank)
                 os.environ["MLX_RING_VERBOSE"] = "1"
+                # lets the generator apply the lower MlxRing prompt cap
+                os.environ["EXO_ACTIVE_BACKEND"] = "MlxRing"
                 group = mx.distributed.init(backend="ring", strict=True)
 
             case MlxJacclInstance(
@@ -137,6 +139,7 @@ def mlx_distributed_init(
                 )
                 logger.info(f"rank {rank} MLX_JACCL_COORDINATOR: {jaccl_coordinator}")
                 os.environ["MLX_IBV_DEVICES"] = coordination_file
+                os.environ["EXO_ACTIVE_BACKEND"] = "MlxJaccl"
                 os.environ["MLX_RANK"] = str(rank)
                 os.environ["MLX_JACCL_COORDINATOR"] = jaccl_coordinator
                 group = mx.distributed.init(backend="jaccl", strict=True)
