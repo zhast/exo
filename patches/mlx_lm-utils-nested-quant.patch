@@ -1,0 +1,29 @@
+--- a/mlx_lm/utils.py
++++ b/mlx_lm/utils.py
+@@ -428,12 +428,22 @@
+ 
+     def _quantize(quantization):
+         def class_predicate(p, m):
+-            # Handle custom per layer quantizations
+-            if p in config["quantization"]:
+-                return config["quantization"][p]
++            # EXO-NESTED-QUANT: glm5_next nests f_a_proj/f_b_proj under
++            # forget_gate. while the checkpoint keys them un-nested.
++            candidates = [p]
++            if ".forget_gate." in p:
++                candidates.append(p.replace(".forget_gate.", "."))
++            # Checkpoints quantised from the upstream-HF layout key their
++            # per-module overrides as "model.layers.N...." while the bridge's
++            # module path is "language_model.model.layers.N....".
++            if p.startswith("language_model."):
++                candidates.append(p[len("language_model.") :])
++            for c in candidates:
++                if c in config["quantization"]:
++                    return config["quantization"][c]
+             if not hasattr(m, "to_quantized"):
+                 return False
+-            return f"{p}.scales" in weights
++            return any(f"{c}.scales" in weights for c in candidates)
+ 
+         nn.quantize(
+             model,

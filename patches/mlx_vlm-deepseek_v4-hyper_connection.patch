@@ -1,0 +1,25 @@
+--- a/mlx_vlm/models/deepseek_v4/hyper_connection.py
++++ b/mlx_vlm/models/deepseek_v4/hyper_connection.py
+@@ -163,8 +163,21 @@
+ def _hc_kernel(x, y, mixes, scale, base, hc_mult, sinkhorn_iters, eps):
+     B, L, H, D = x.shape
+ 
++    # The kernel reads mixes/scale/base as float32 -- it type-puns them with
++    # `*(const device float4*)` and indexes `scale[0]`. HyperConnection creates
++    # them as float32, so that holds at init, but loading a checkpoint replaces
++    # them with whatever dtype it stores (bf16 in every GLM-5.3 / DeepSeek-V4
++    # release), and the kernel then reinterprets those bytes as float32. The
++    # sinkhorn still normalises the result into a plausible doubly-stochastic
++    # matrix, so the model runs at full speed and silently emits garbage.
++    # _hc_ops is unaffected because _hc_split_sinkhorn_ops casts explicitly.
+     return _hc_sinkhorn_collapse_kernel(
+-        inputs=[x, mixes, scale, base],
++        inputs=[
++            x,
++            mixes.astype(mx.float32),
++            scale.astype(mx.float32),
++            base.astype(mx.float32),
++        ],
+         template=[
+             ("T", x.dtype),
+             ("U", x.dtype),
