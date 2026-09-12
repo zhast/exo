@@ -1,4 +1,6 @@
 import contextlib
+import json
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Literal, cast
@@ -59,6 +61,51 @@ from exo.worker.runner.bootstrap import logger
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
 
 
+def _load_tunables() -> dict[str, object]:
+    """Deployment tunables that must be changeable with an instance reload only.
+
+    Runner processes inherit their environment from the exo LaunchDaemon, so an
+    env-var change costs a full node restart. A small JSON file costs a ~2 min
+    instance reload instead. Env vars still win when set.
+    """
+    path = os.environ.get("EXO_TUNABLES_PATH", "/usr/local/etc/exo-tunables.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:  # malformed file must never take the runner down
+        logger.warning(f"ignoring unreadable tunables file {path}: {e}")
+        return {}
+
+
+_TUNABLES = _load_tunables()
+
+
+def _tunable(name: str, env: str, default, cast=int):
+    raw = os.environ.get(env)
+    if raw is None:
+        raw = _TUNABLES.get(name)
+    if raw is None:
+        return default
+    try:
+        return cast(raw)
+    except (TypeError, ValueError):
+        logger.warning(f"tunable {name}={raw!r} is not a valid value; using {default}")
+        return default
+
+
+_TELEMETRY = bool(_tunable("mem_telemetry", "EXO_MEM_TELEMETRY", 0))
+
+
+def _mem(tag: str) -> str:
+    return (
+        f"[mem] {tag} active={mx.get_active_memory() / 1e9:.2f} "
+        f"peak={mx.get_peak_memory() / 1e9:.2f} cache={mx.get_cache_memory() / 1e9:.2f} GB"
+    )
+
+
 def _stop_sequences(task_params: TextGenerationTaskParams) -> list[str]:
     if task_params.stop is None:
         return []
@@ -87,6 +134,34 @@ class _EngineTask:
     last_gen_token_time: float | None = None
 
 
+class UnsupportedRequestError(ValueError):
+    """The request asks for something this runner cannot serve.
+
+    Raised for request-level problems, such as image input on an instance that
+    has no vision processor. Only this request fails; the runner stays up and
+    the client gets an error instead of a silently wrong answer.
+    """
+
+
+def check_vision_support(
+    task_params: TextGenerationTaskParams,
+    vision_processor: VisionProcessor | None,
+) -> None:
+    """Refuse image input when nothing can process it.
+
+    The vision processor is None when the model has none, or when loading it
+    failed and load_mlx_items disabled vision for this runner. Dropping the
+    images would leave a bare image placeholder in the prompt, and the model
+    would answer confidently about an image it never saw.
+    """
+    if task_params.images and vision_processor is None:
+        raise UnsupportedRequestError(
+            f"{len(task_params.images)} image(s) were provided, but this model "
+            "instance has no vision processor loaded; image input is not "
+            "supported here."
+        )
+
+
 @dataclass(eq=False)
 class ExoBatchGenerator:
     model: Model
@@ -102,9 +177,22 @@ class ExoBatchGenerator:
         self._mlx_gen = MlxBatchGenerator(
             model=self.model,
             stop_tokens=[[t] for t in eos_ids_from_tokenizer(self.tokenizer)],
-            prefill_step_size=4096,
+            # 4096-token prefill chunks cost several GB of transient GPU memory
+            # (sparse-attention gather/mask, MoE and linear-attention buffers) on
+            # ranks that already hold ~75 GB of weights; 1024 cuts that ~4x.
+            prefill_step_size=_tunable(
+                "prefill_step_size", "EXO_PREFILL_STEP_SIZE", 1024
+            ),
         )
         self._step_count = 0
+        cache_gb = _tunable("mlx_cache_limit_gb", "EXO_MLX_CACHE_LIMIT_GB", None, float)
+        if cache_gb is not None:
+            # Cached-but-free Metal buffers still occupy wired GPU memory. Capping
+            # the cache trades some allocator churn for live-peak headroom.
+            mx.set_cache_limit(int(cache_gb * 1e9))
+            logger.info(f"[mem] mlx cache limit set to {cache_gb:.1f} GB")
+        if _TELEMETRY:
+            logger.info(_mem("after-load"))
 
     @property
     def has_work(self) -> bool:
@@ -128,8 +216,23 @@ class ExoBatchGenerator:
             all_prompt_tokens, self.tokenizer
         )
 
+        # Every rank tokenizes the same prompt, so this rejects consistently on
+        # all of them and the runner's UnsupportedRequestError path retires the
+        # task cleanly. A ~100k-token prompt exhausted GPU memory on the heaviest
+        # pipeline rank of GLM-5.3-Flash 6-bit on 2026-09-02; 60k was fine.
+        max_prompt_tokens = _tunable(
+            "max_prompt_tokens", "EXO_MAX_PROMPT_TOKENS", 65536
+        )
+        if len(all_prompt_tokens) > max_prompt_tokens:
+            raise UnsupportedRequestError(
+                f"prompt is {len(all_prompt_tokens)} tokens; this deployment accepts "
+                f"at most {max_prompt_tokens} tokens per request"
+            )
+
         vision: VisionResult | None = None
         media_regions: list[MediaRegion] = []
+
+        check_vision_support(task_params, self.vision_processor)
 
         if self.vision_processor is not None:
             try:
@@ -142,7 +245,13 @@ class ExoBatchGenerator:
                     model_id=task_params.model,
                     task_params=task_params,
                 )
-            except Exception:
+            except Exception as e:
+                if task_params.images:
+                    # The user sent images; answering without them is wrong,
+                    # not a fallback.
+                    raise UnsupportedRequestError(
+                        f"Vision processing failed for this request: {e}"
+                    ) from e
                 logger.opt(exception=True).warning(
                     "Vision processing failed, falling back to text-only"
                 )
@@ -279,6 +388,13 @@ class ExoBatchGenerator:
 
         uid = uids[0]
 
+        if _TELEMETRY:
+            mx.reset_peak_memory()
+            logger.info(
+                f"[mem] submit uid={uid} prompt_tokens={len(all_prompt_tokens)} "
+                f"prefix_hit={prefix_hit_length} "
+                f"active={mx.get_active_memory() / 1e9:.2f} cache={mx.get_cache_memory() / 1e9:.2f} GB"
+            )
         self._active_tasks[uid] = _EngineTask(
             uid=uid,
             task_params=task_params,
@@ -431,7 +547,20 @@ class ExoBatchGenerator:
             )
 
             if is_done:
+                if _TELEMETRY:
+                    logger.info(
+                        f"[mem] done uid={response.uid} "
+                        f"prompt_tokens={len(state.all_prompt_tokens)} "
+                        f"completion={state.completion_tokens} "
+                        f"peak={mx.get_peak_memory() / 1e9:.2f} "
+                        f"active={mx.get_active_memory() / 1e9:.2f} "
+                        f"cache={mx.get_cache_memory() / 1e9:.2f} GB"
+                    )
                 del self._active_tasks[response.uid]
+                if not self._active_tasks:
+                    # Batch drained: hand MLX's buffer cache back so memory a long
+                    # prompt grabbed is released now, not at the next pressure.
+                    mx.clear_cache()
             elif (
                 max_stop_len > 0
                 and len(state.potential_stop_sequence_text) > max_stop_len
@@ -454,6 +583,8 @@ class ExoBatchGenerator:
         self._mlx_gen.remove(uids)
         for uid in uids:
             self._active_tasks.pop(uid, None)
+        if not self._active_tasks:
+            mx.clear_cache()
 
     def close(self) -> None:
         self._mlx_gen.close()

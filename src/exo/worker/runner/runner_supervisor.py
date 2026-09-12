@@ -12,6 +12,8 @@ from anyio import (
 )
 from loguru import logger
 
+_KILL_ATTEMPTS = 5
+
 from exo.shared.types.chunks import ErrorChunk
 from exo.shared.types.events import (
     ChunkGenerated,
@@ -136,7 +138,7 @@ class RunnerSupervisor:
                     "Runner process didn't shutdown succesfully, terminating"
                 )
                 self.runner_process.terminate()
-                self.runner_process.join(timeout=10)
+                await to_thread.run_sync(self.runner_process.join, 10)
 
                 if not self.runner_process.is_alive():
                     logger.warning("Terminated nicely in the first attempt!")
@@ -145,7 +147,7 @@ class RunnerSupervisor:
                     # Try really hard to terminate
                     for i in range(2, 11):
                         self.runner_process.terminate()
-                        self.runner_process.join(timeout=2)
+                        await to_thread.run_sync(self.runner_process.join, 2)
                         if not self.runner_process.is_alive():
                             logger.warning(f"That took {i} attempts :)")
                             break
@@ -154,16 +156,30 @@ class RunnerSupervisor:
                         logger.critical(
                             "Runner process didn't respond to SIGTERM, killing"
                         )
-                        j = 0
-                        while self.runner_process.is_alive():
-                            j += 1
+                        # A runner wedged in an uninterruptible kernel wait
+                        # (Metal/RDMA teardown) never reaps, and SIGKILL cannot
+                        # move it. Retrying forever wedges this coroutine, and
+                        # with it the worker's plan loop and the master's API.
+                        # Give up after a bounded number of attempts and leave
+                        # the process orphaned for the OS to collect.
+                        for j in range(1, _KILL_ATTEMPTS + 1):
                             self.runner_process.kill()
-                            self.runner_process.join(timeout=5)
-                            logger.warning(f"That took {j} attempts :(")
+                            await to_thread.run_sync(self.runner_process.join, 5)
+                            if not self.runner_process.is_alive():
+                                logger.warning(f"That took {j} attempts :(")
+                                break
+                        else:
+                            logger.critical(
+                                f"Runner process {self.runner_process.pid} ignored "
+                                f"SIGKILL {_KILL_ATTEMPTS} times (uninterruptible "
+                                "wait); orphaning it rather than blocking shutdown"
+                            )
             else:
                 logger.info("Runner process succesfully terminated")
 
-            self.runner_process.close()
+            # close() raises ValueError if the process was never reaped.
+            with contextlib.suppress(ValueError):
+                self.runner_process.close()
 
     def shutdown(self):
         self._tg.cancel_tasks()

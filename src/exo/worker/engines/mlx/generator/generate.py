@@ -275,6 +275,37 @@ def pipeline_parallel_prefill(
     )
 
 
+def _ssm_snapshot_stride() -> int:
+    """Tokens between SSM-state snapshots kept during prefill (default 8192).
+
+    exo kept a snapshot after every prefill chunk: with 8-9 Gated-DeltaNet layers
+    per rank that is ~35 MB per 1024 tokens, pinned for the whole prefill and then
+    stored in the prefix cache -- ~5 GB for a 150k-token prompt on every rank,
+    which tipped a 4-rank GLM-5.3 pipeline into a Metal OOM. Snapshots are only
+    restore points for partial prefix hits, so a coarser stride costs at most
+    `stride` tokens of re-prefill on such a hit. The two most recent snapshots are
+    always kept regardless, because the post-prefill rollback needs them.
+    Env EXO_SSM_SNAPSHOT_STRIDE wins; else the deployment tunables file.
+    """
+    import json
+    import os
+
+    raw: object = os.environ.get("EXO_SSM_SNAPSHOT_STRIDE")
+    if raw is None:
+        try:
+            path = os.environ.get(
+                "EXO_TUNABLES_PATH", "/usr/local/etc/exo-tunables.json"
+            )
+            with open(path) as f:
+                raw = json.load(f).get("ssm_snapshot_stride_tokens")
+        except Exception:
+            raw = None
+    try:
+        return max(1, int(raw)) if raw is not None else 8192  # pyright: ignore[reportArgumentType]
+    except (TypeError, ValueError):
+        return 8192
+
+
 def prefill(
     model: Model,
     tokenizer: TokenizerWrapper,
@@ -300,17 +331,29 @@ def prefill(
     logger.debug(f"Prefilling {num_tokens} tokens...")
     start_time = time.perf_counter()
     has_ssm = has_non_kv_caches(cache)
-    snapshots: list[CacheSnapshot] = []
+    # Stride snapshots (restore points for the prefix cache) plus a rolling window
+    # of the two most recent ones: the rollback below needs the state after the
+    # full prompt (second to last) and the prefix cache must not see the +1 token.
+    stride_snapshots: list[CacheSnapshot] = []
+    recent_snapshots: list[CacheSnapshot] = []
+    snapshot_stride = _ssm_snapshot_stride()
+    last_stride_at = 0
 
     # TODO(evan): kill the callbacks/runner refactor
     def progress_callback(processed: int, total: int) -> None:
+        nonlocal last_stride_at
         elapsed = time.perf_counter() - start_time
         tok_per_sec = processed / elapsed if elapsed > 0 else 0
         logger.debug(
             f"Prefill progress: {processed}/{total} tokens ({tok_per_sec:.1f} tok/s)"
         )
         if has_ssm:
-            snapshots.append(snapshot_ssm_states(cache))
+            snap = snapshot_ssm_states(cache)
+            recent_snapshots.append(snap)
+            del recent_snapshots[:-2]
+            if processed - last_stride_at >= snapshot_stride:
+                stride_snapshots.append(snap)
+                last_stride_at = processed
 
         if on_prefill_progress is not None:
             on_prefill_progress(processed, total)
@@ -370,6 +413,12 @@ def prefill(
 
     # stream_generate added 1 extra generated token to the cache, so we should trim it.
     # Because of needing to roll back arrays cache, we will generate on 2 tokens so trim 1 more.
+    # Merge stride snapshots with the two most recent ones (dedupe by position);
+    # this reproduces the old per-chunk list's tail exactly.
+    snapshots: list[CacheSnapshot] = list(stride_snapshots)
+    for snap in recent_snapshots:
+        if not snapshots or snap.token_count > snapshots[-1].token_count:
+            snapshots.append(snap)
     pre_gen = deepcopy(snapshots[-2]) if has_ssm else None
     for i, c in enumerate(cache):
         if has_ssm and isinstance(c, (ArraysCache, RotatingKVCache)):

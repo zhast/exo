@@ -18,7 +18,10 @@ from exo.shared.types.text_generation import TextGenerationTaskParams
 from exo.shared.types.worker.runner_response import GenerationResponse
 from exo.utils.channels import MpReceiver, MpSender
 from exo.worker.engines.mlx.cache import KVPrefixCache
-from exo.worker.engines.mlx.generator.batch_generate import ExoBatchGenerator
+from exo.worker.engines.mlx.generator.batch_generate import (
+    ExoBatchGenerator,
+    UnsupportedRequestError,
+)
 from exo.worker.engines.mlx.generator.generate import (
     PrefillCancelled,
     mlx_generate,
@@ -393,11 +396,20 @@ class BatchGenerator(InferenceGenerator):
             self.agree_on_tasks()
 
         # Submit any queued tasks to the engine
+        rejected: list[tuple[TaskId, Finished]] = []
         while self._queue and len(self._active_tasks) < EXO_MAX_CONCURRENT_REQUESTS:
             task = self._queue.popleft()
             try:
                 uid = self._start_task(task)
             except PrefillCancelled:
+                continue
+            except UnsupportedRequestError as e:
+                # A request this runner cannot serve (e.g. images without a
+                # vision processor). Tell the client, then retire the task so
+                # the runner returns to idle -- without a terminal result the
+                # task would stay in active_tasks and step() would spin.
+                self._send_error(task, e)
+                rejected.append((task.task_id, Finished()))
                 continue
             except Exception as e:
                 self._send_error(task, e)
@@ -421,7 +433,7 @@ class BatchGenerator(InferenceGenerator):
             self._active_tasks[uid] = (task, queue, output_generator)
 
         if not self._mlx_gen.has_work:
-            return self._apply_cancellations()
+            return itertools.chain(rejected, self._apply_cancellations())
 
         results = self._mlx_gen.step()
 
@@ -443,7 +455,7 @@ class BatchGenerator(InferenceGenerator):
                 output.append((task.task_id, Finished()))
                 del self._active_tasks[uid]
 
-        return itertools.chain(output, self._apply_cancellations())
+        return itertools.chain(rejected, output, self._apply_cancellations())
 
     def _apply_cancellations(
         self,

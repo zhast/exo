@@ -77,6 +77,15 @@ class Election:
         self._cm_receiver = connection_message_receiver
         self._co_receiver = command_receiver
 
+        # Peers currently believed reachable. libp2p emits a Connection update
+        # for every connection open/close, including ones that do not change
+        # reachability (a second transport, a gossipsub regraft, an identify
+        # refresh). Each such update used to start a fresh campaign, and the API
+        # is paused for the whole DEFAULT_ELECTION_TIMEOUT of every campaign --
+        # on an idle 4-node cluster that was 12 elections/min and a ~3 s stall
+        # on most requests. Only a change in this set can change the outcome.
+        self._connected_peers: set[NodeId] = set()
+
         # Campaign state
         self._candidates: list[ElectionMessage] = []
         self._campaign_cancel_scope: CancelScope | None = None
@@ -166,6 +175,9 @@ class Election:
                 logger.debug(
                     f"Connection messages received: {first} followed by {rest}"
                 )
+                if not self._apply_connection_updates([first, *rest]):
+                    logger.debug("Peer set unchanged - not starting a campaign")
+                    continue
                 logger.debug(f"Current clock: {self.clock}")
                 # These messages are strictly peer to peer
                 self.clock += 1
@@ -178,6 +190,25 @@ class Election:
                 )
                 logger.debug("Campaign started")
                 logger.debug("Connection message added")
+
+    def _apply_connection_updates(self, messages: list[ConnectionMessage]) -> bool:
+        """Fold connection updates into the peer set; True if it changed."""
+        # Compare the set before and after the whole batch, not step by step:
+        # the discovery behaviour re-dials every known peer every
+        # RETRY_CONNECT_INTERVAL (5 s) and the duplicate connection is closed
+        # at once, so a batch is typically "established, closed" for the same
+        # peer -- a net no-op that must not start a campaign.
+        before = frozenset(self._connected_peers)
+        for message in messages:
+            if message.connected:
+                self._connected_peers.add(message.node_id)
+            else:
+                self._connected_peers.discard(message.node_id)
+        changed = frozenset(self._connected_peers) != before
+        logger.debug(
+            f"connection updates: {[(m.node_id, m.connected) for m in messages]} -> changed={changed}"
+        )
+        return changed
 
     async def _command_counter(self) -> None:
         with self._co_receiver as commands:

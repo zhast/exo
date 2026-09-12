@@ -42,6 +42,23 @@ _MEMORY_THRESHOLD = float(
 )
 
 
+def _prune_snapshot_stride() -> int:
+    """Grid used to keep SSM snapshots on cache updates; mirrors generate.py's
+    EXO_SSM_SNAPSHOT_STRIDE / tunable ssm_snapshot_stride_tokens (default 8192)."""
+    try:
+        import json as _json
+        with open("/usr/local/etc/exo-tunables.json") as fh:
+            v = _json.load(fh).get("ssm_snapshot_stride_tokens")
+            if v:
+                return int(v)
+    except Exception:
+        pass
+    try:
+        return int(os.environ.get("EXO_SSM_SNAPSHOT_STRIDE", "8192"))
+    except ValueError:
+        return 8192
+
+
 class CacheSnapshot:
     """Snapshot of states at a known token position."""
 
@@ -170,6 +187,17 @@ class KVPrefixCache:
             merged = [s for s in old_snapshots if s.token_count <= restore_pos]
         if snapshots:
             merged.extend(snapshots)
+        # Bound growth: every incremental turn appends its two most recent
+        # snapshots at off-grid positions, and eviction never runs on in-place
+        # updates, so a long agent session accumulates one ~35 MB SSM snapshot
+        # per turn (rank 0 grew 80.6 -> 89.7 GB over 290 turns on 2026-09-03 and
+        # aborted). Keep the stride grid plus the two newest; drop the rest.
+        if len(merged) > 2:
+            stride = _prune_snapshot_stride()
+            merged.sort(key=lambda s: s.token_count)
+            tail = merged[-2:]
+            grid = [s for s in merged[:-2] if stride > 0 and s.token_count % stride == 0]
+            merged = grid + tail
 
         self.prompts[index] = prompt_tokens
         self.caches[index] = deepcopy(cache)
